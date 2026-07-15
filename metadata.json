@@ -1,0 +1,6 @@
+{
+  "name": "FitAI: Fitness Buddy",
+  "description": "A comprehensive wellness, fitness, and nutrition tracker featuring interactive weight logging, dynamic macro scanning, and a personalized AI health coach.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
