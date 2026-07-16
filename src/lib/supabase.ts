@@ -65,90 +65,85 @@ const setLocalSession = (session: AppUserSession | null) => {
 };
 
 /**
+ * Safe Upsert for User Profiles - handles schema mismatch/missing columns dynamically.
+ */
+export async function safeUpsertProfile(payload: any): Promise<{ success: boolean; error?: any }> {
+  if (!isSupabaseConfigured || !supabase) {
+    return { success: false, error: new Error("Supabase is not configured") };
+  }
+
+  let currentPayload = { ...payload };
+  let attempts = 0;
+  while (attempts < 10) {
+    try {
+      const { error } = await supabase
+        .from('profiles')
+        .upsert(currentPayload);
+
+      if (!error) {
+        return { success: true };
+      }
+
+      const errorMsg = error.message || "";
+      let missingCol: string | null = null;
+      
+      const match1 = errorMsg.match(/Could not find the '([^']+)' column/i);
+      const match2 = errorMsg.match(/column "([^"]+)" of relation/i);
+      const match3 = errorMsg.match(/column "([^"]+)" does not exist/i);
+      
+      if (match1) missingCol = match1[1];
+      else if (match2) missingCol = match2[1];
+      else if (match3) missingCol = match3[1];
+
+      if (missingCol) {
+        console.warn(`[Supabase Healing] Stripping missing column '${missingCol}' from profiles payload and retrying.`);
+        delete currentPayload[missingCol];
+        attempts++;
+      } else {
+        return { success: false, error };
+      }
+    } catch (err: any) {
+      return { success: false, error: err };
+    }
+  }
+  return { success: false, error: new Error("Too many retries trying to heal profile payload") };
+}
+
+/**
  * Authentication Wrapper
  */
 export const authService = {
-  async signUp(email: string, password: string, fullName: string): Promise<{ success: boolean; user?: AppUserSession; error?: string }> {
-    if (isSupabaseConfigured && supabase) {
-      try {
-        const { data, error } = await supabase.auth.signUp({
-          email,
-          password,
-          options: {
-            data: {
-              full_name: fullName
-            }
-          }
-        });
-
-        if (error) throw error;
-        if (!data.user) throw new Error("Could not create user account.");
-
-        const userSession: AppUserSession = {
-          id: data.user.id,
-          email: data.user.email || email,
-          fullName: fullName
-        };
-
-        // Initialize user profile with clean/empty values for new users
-        const defaultProfile: UserProfile = {
-          fullName,
-          email,
-          currentWeight: 0,
-          targetWeight: 0,
-          height: 0,
-          gender: "",
-          age: 0,
-          activityLevel: "moderate",
-          calorieGoal: 0,
-          proteinGoal: 0,
-          carbsGoal: 0,
-          fatGoal: 0,
-          weightUnit: "lbs",
-          onboardingComplete: false
-        };
-
-        // Cache profile in localStorage for immediate/fallback usage
-        const uKeys = getKeys(data.user.id);
-        localStorage.setItem(uKeys.profile, JSON.stringify(defaultProfile));
-
-        const { error: profileError } = await supabase
-          .from('profiles')
-          .upsert({
-            id: data.user.id,
-            full_name: fullName,
-            email: email,
-            current_weight: 0,
-            target_weight: 0,
-            height_cm: 0,
-            gender: "",
-            age: 0,
-            activity_level: "moderate",
-            calorie_goal: 0,
-            protein_goal: 0,
-            carbs_goal: 0,
-            fat_goal: 0,
-            weight_unit: "lbs"
-          });
-
-        if (profileError) {
-          console.warn("Could not insert profile in database, trying simple fallback:", profileError.message);
-        }
-
-        setLocalSession(userSession);
-        return { success: true, user: userSession };
-
-      } catch (err: any) {
-        return { success: false, error: err.message };
-      }
-    } else {
-      // Simulation mode
-      const userSession: AppUserSession = {
-        id: `user_${Math.random().toString(36).substring(7)}`,
+  async signUp(email: string, password: string, fullName: string): Promise<{ success: boolean; sessionActive?: boolean; user?: AppUserSession; error?: string }> {
+    if (!isSupabaseConfigured || !supabase) {
+      return { 
+        success: false, 
+        error: "Supabase integration is not configured. Please define VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in your settings to register an account." 
+      };
+    }
+    try {
+      const redirectUrl = window.location.origin + "/?verified=true";
+      const { data, error } = await supabase.auth.signUp({
         email,
-        fullName
+        password,
+        options: {
+          data: {
+            full_name: fullName
+          },
+          emailRedirectTo: redirectUrl
+        }
+      });
+
+      if (error) throw error;
+      if (!data.user) throw new Error("Could not create user account.");
+
+      const sessionActive = !!data.session;
+      const userSession: AppUserSession = {
+        id: data.user.id,
+        email: data.user.email || email,
+        fullName: fullName
       };
 
+      // Initialize user profile with clean/empty values for new users
       const defaultProfile: UserProfile = {
         fullName,
         email,
@@ -166,93 +161,104 @@ export const authService = {
         onboardingComplete: false
       };
 
-      const uKeys = getKeys(userSession.id);
+      // Cache profile in localStorage for immediate/fallback usage
+      const uKeys = getKeys(data.user.id);
       localStorage.setItem(uKeys.profile, JSON.stringify(defaultProfile));
 
-      // Save user to simulated database
-      saveLocalUser(email, userSession);
+      const signupProfile = {
+        id: data.user.id,
+        full_name: fullName,
+        email: email,
+        current_weight: 0,
+        target_weight: 0,
+        height_cm: 0,
+        gender: "",
+        age: 0,
+        activity_level: "moderate",
+        calorie_goal: 0,
+        protein_goal: 0,
+        carbs_goal: 0,
+        fat_goal: 0,
+        weight_unit: "lbs"
+      };
 
-      setLocalSession(userSession);
-      return { success: true, user: userSession };
+      const { success: profileOk, error: profileError } = await safeUpsertProfile(signupProfile);
+
+      if (!profileOk && profileError) {
+        console.warn("Could not insert profile in database, trying simple fallback:", profileError.message || profileError);
+      }
+
+      if (sessionActive) {
+        setLocalSession(userSession);
+        return { success: true, sessionActive: true, user: userSession };
+      } else {
+        return { success: true, sessionActive: false };
+      }
+
+    } catch (err: any) {
+      return { success: false, error: err.message };
     }
   },
 
   async signIn(email: string, password: string): Promise<{ success: boolean; user?: AppUserSession; error?: string }> {
-    if (isSupabaseConfigured && supabase) {
-      try {
-        const { data, error } = await supabase.auth.signInWithPassword({
-          email,
-          password
-        });
+    if (!isSupabaseConfigured || !supabase) {
+      return { 
+        success: false, 
+        error: "Supabase integration is not configured. Please define VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in your settings to log in." 
+      };
+    }
+    try {
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email,
+        password
+      });
 
-        if (error) throw error;
-        if (!data.user) throw new Error("Could not retrieve user.");
+      if (error) throw error;
+      if (!data.user) throw new Error("Could not retrieve user.");
 
-        // Retrieve custom full name from profile or metadata
-        let fullName = data.user.user_metadata?.full_name || "Jamie Vance";
-        
-        const { data: profileData } = await supabase
-          .from('profiles')
-          .select('full_name')
-          .eq('id', data.user.id)
-          .single();
+      // Retrieve custom full name from profile or metadata
+      let fullName = data.user.user_metadata?.full_name || "Jamie Vance";
+      
+      const { data: profileData } = await supabase
+        .from('profiles')
+        .select('full_name')
+        .eq('id', data.user.id)
+        .single();
 
-        if (profileData?.full_name) {
-          fullName = profileData.full_name;
-        }
-
-        const userSession: AppUserSession = {
-          id: data.user.id,
-          email: data.user.email || email,
-          fullName: fullName
-        };
-
-        setLocalSession(userSession);
-        return { success: true, user: userSession };
-
-      } catch (err: any) {
-        return { success: false, error: err.message };
+      if (profileData?.full_name) {
+        fullName = profileData.full_name;
       }
-    } else {
-      // Simulation mode
-      const users = getLocalUsers();
-      const existingUser = users[email.toLowerCase()];
 
-      let userSession: AppUserSession;
-
-      if (existingUser) {
-        userSession = existingUser;
-      } else {
-        // Automatically create a simulated user if they sign in (helps for local developer convenience)
-        userSession = {
-          id: `user_${Math.random().toString(36).substring(7)}`,
-          email,
-          fullName: email.split('@')[0]
-        };
-        saveLocalUser(email, userSession);
-
-        const defaultProfile: UserProfile = {
-          fullName: userSession.fullName,
-          email,
-          currentWeight: 0,
-          targetWeight: 0,
-          height: 0,
-          gender: "",
-          age: 0,
-          activityLevel: "moderate",
-          calorieGoal: 0,
-          proteinGoal: 0,
-          carbsGoal: 0,
-          fatGoal: 0,
-          weightUnit: "lbs",
-          onboardingComplete: false
-        };
-        const uKeys = getKeys(userSession.id);
-        localStorage.setItem(uKeys.profile, JSON.stringify(defaultProfile));
-      }
+      const userSession: AppUserSession = {
+        id: data.user.id,
+        email: data.user.email || email,
+        fullName: fullName
+      };
 
       setLocalSession(userSession);
       return { success: true, user: userSession };
+
+    } catch (err: any) {
+      return { success: false, error: err.message };
+    }
+  },
+
+  async resendVerification(email: string): Promise<{ success: boolean; error?: string }> {
+    if (!isSupabaseConfigured || !supabase) {
+      return { 
+        success: false, 
+        error: "Supabase is not configured. Please define VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to enable authentication services." 
+      };
+    }
+    try {
+      const { error } = await supabase.auth.resend({
+        type: 'signup',
+        email: email,
+      });
+      if (error) throw error;
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message };
     }
   },
 
@@ -273,6 +279,21 @@ export const authService = {
  */
 export const profileService = {
   async getProfile(userId: string): Promise<UserProfile> {
+    const session = getLocalSession();
+    const fallbackName = (session && session.id === userId) ? session.fullName : "";
+    const fallbackEmail = (session && session.id === userId) ? session.email : "";
+
+    const uKeys = getKeys(userId);
+    const cached = localStorage.getItem(uKeys.profile);
+    let cachedProfile: UserProfile | null = null;
+    if (cached) {
+      try {
+        cachedProfile = JSON.parse(cached);
+      } catch (e) {
+        console.warn("Could not parse cached local profile", e);
+      }
+    }
+
     if (isSupabaseConfigured && supabase) {
       try {
         const { data, error } = await supabase
@@ -283,10 +304,36 @@ export const profileService = {
 
         if (error) {
           if (error.code === 'PGRST116') {
-            // New user without a profile record
+            // New user without a profile record yet - let's create one in database to persist it
+            const initialProfile = {
+              id: userId,
+              full_name: fallbackName,
+              email: fallbackEmail,
+              current_weight: cachedProfile?.currentWeight || 0,
+              target_weight: cachedProfile?.targetWeight || 0,
+              height_cm: cachedProfile?.height || 0,
+              gender: cachedProfile?.gender || "",
+              age: cachedProfile?.age || 0,
+              activity_level: cachedProfile?.activityLevel || "moderate",
+              calorie_goal: cachedProfile?.calorieGoal || 0,
+              protein_goal: cachedProfile?.proteinGoal || 0,
+              carbs_goal: cachedProfile?.carbsGoal || 0,
+              fat_goal: cachedProfile?.fatGoal || 0,
+              weight_unit: cachedProfile?.weightUnit || "lbs"
+            };
+
+            const { success: insOk, error: insError } = await safeUpsertProfile(initialProfile);
+            if (!insOk && insError) {
+              console.warn("Could not insert initial database profile row:", insError.message || insError);
+            }
+
+            if (cachedProfile) {
+              return cachedProfile;
+            }
+
             return {
-              fullName: "",
-              email: "",
+              fullName: fallbackName,
+              email: fallbackEmail,
               currentWeight: 0,
               targetWeight: 0,
               height: 0,
@@ -304,9 +351,9 @@ export const profileService = {
           throw error;
         }
 
-        return {
-          fullName: data.full_name || "",
-          email: data.email || "",
+        const dbProfile: UserProfile = {
+          fullName: data.full_name || fallbackName,
+          email: data.email || fallbackEmail,
           currentWeight: data.current_weight ? Number(data.current_weight) : 0,
           targetWeight: data.target_weight ? Number(data.target_weight) : 0,
           height: data.height_cm ? Number(data.height_cm) : 0,
@@ -318,10 +365,50 @@ export const profileService = {
           carbsGoal: data.carbs_goal ? Number(data.carbs_goal) : 0,
           fatGoal: data.fat_goal ? Number(data.fat_goal) : 0,
           weightUnit: data.weight_unit || "lbs",
-          onboardingComplete: data.onboarding_complete !== undefined ? !!data.onboarding_complete : (data.calorie_goal && Number(data.calorie_goal) > 0)
+          onboardingComplete: !!(data.onboarding_complete || (data.calorie_goal && Number(data.calorie_goal) > 0))
         };
-      } catch (err) {
-        console.warn("Database profile fetch error, returning default / local profile.", err);
+
+        // If DB profile is empty but local cached profile is complete, heal/sync local profile to DB
+        if (!dbProfile.onboardingComplete && cachedProfile && cachedProfile.onboardingComplete) {
+          console.log("Local profile is complete but DB profile is not. Syncing local profile to DB.");
+          
+          const payload: any = {
+            id: userId,
+            full_name: cachedProfile.fullName,
+            email: cachedProfile.email,
+            current_weight: cachedProfile.currentWeight,
+            target_weight: cachedProfile.targetWeight,
+            height_cm: cachedProfile.height,
+            gender: cachedProfile.gender || null,
+            age: cachedProfile.age,
+            activity_level: cachedProfile.activityLevel,
+            calorie_goal: cachedProfile.calorieGoal,
+            protein_goal: cachedProfile.proteinGoal,
+            carbs_goal: cachedProfile.carbsGoal,
+            fat_goal: cachedProfile.fatGoal,
+            weight_unit: cachedProfile.weightUnit,
+            onboarding_complete: true
+          };
+
+          safeUpsertProfile(payload).then((res) => {
+            if (res.success) {
+              console.log("Profile successfully synced to DB.");
+            } else {
+              console.error("Could not sync profile to DB:", res.error?.message || res.error);
+            }
+          });
+          
+          return cachedProfile;
+        }
+
+        // Cache the latest valid DB profile to localStorage
+        localStorage.setItem(uKeys.profile, JSON.stringify(dbProfile));
+        return dbProfile;
+      } catch (err: any) {
+        console.warn("Database profile fetch error, returning default / local profile.", err.message || err);
+        if (cachedProfile) {
+          return cachedProfile;
+        }
       }
     }
 
@@ -345,20 +432,13 @@ export const profileService = {
       };
     }
 
-    const uKeys = getKeys(userId);
-    const cached = localStorage.getItem(uKeys.profile);
-    if (cached) {
-      return JSON.parse(cached);
+    if (cachedProfile) {
+      return cachedProfile;
     }
 
-    // Try to get fullName and email from session
-    const session = getLocalSession();
-    const name = (session && session.id === userId) ? session.fullName : "";
-    const emailStr = (session && session.id === userId) ? session.email : "";
-
     return {
-      fullName: name,
-      email: emailStr,
+      fullName: fallbackName,
+      email: fallbackEmail,
       currentWeight: 0,
       targetWeight: 0,
       height: 0,
@@ -380,27 +460,32 @@ export const profileService = {
 
     if (isSupabaseConfigured && supabase) {
       try {
-        await supabase
-          .from('profiles')
-          .upsert({
-            id: userId,
-            full_name: profile.fullName,
-            email: profile.email,
-            current_weight: profile.currentWeight,
-            target_weight: profile.targetWeight,
-            height_cm: profile.height,
-            gender: profile.gender,
-            age: profile.age,
-            activity_level: profile.activityLevel,
-            calorie_goal: profile.calorieGoal,
-            protein_goal: profile.proteinGoal,
-            carbs_goal: profile.carbsGoal,
-            fat_goal: profile.fatGoal,
-            weight_unit: profile.weightUnit,
-            onboarding_complete: profile.onboardingComplete
-          });
-      } catch (err) {
-        console.error("Could not sync profile with Supabase:", err);
+        const payload: any = {
+          id: userId,
+          full_name: profile.fullName || null,
+          email: profile.email || null,
+          current_weight: profile.currentWeight,
+          target_weight: profile.targetWeight,
+          height_cm: profile.height,
+          gender: profile.gender || null,
+          age: profile.age,
+          activity_level: profile.activityLevel,
+          calorie_goal: profile.calorieGoal,
+          protein_goal: profile.proteinGoal,
+          carbs_goal: profile.carbsGoal,
+          fat_goal: profile.fatGoal,
+          weight_unit: profile.weightUnit,
+          onboarding_complete: profile.onboardingComplete
+        };
+
+        const { success, error } = await safeUpsertProfile(payload);
+        if (success) {
+          console.log("Profile successfully updated in Supabase.");
+        } else {
+          console.error("Could not sync profile with Supabase:", error?.message || error);
+        }
+      } catch (err: any) {
+        console.error("Could not sync profile with Supabase:", err.message || err);
       }
     }
   }
@@ -570,7 +655,7 @@ export const chatHistoryService = {
           .from('chat_history')
           .select('*')
           .eq('user_id', userId)
-          .order('id', { ascending: true }); // ID can act as chronological order or use raw created_at
+          .order('created_at', { ascending: true }); // Sort chronologically to prevent message scrambling
 
         if (error) throw error;
 

@@ -51,9 +51,28 @@ export default function App() {
   const [weightLogs, setWeightLogs] = useState<WeightLog[]>(DEFAULT_WEIGHT_LOGS);
   const [mealLogs, setMealLogs] = useState<MealLog[]>(DEFAULT_MEAL_LOGS);
   const [chatHistory, setChatHistory] = useState<Message[]>(DEFAULT_CHAT);
+  const [verifiedSuccessMessage, setVerifiedSuccessMessage] = useState<string>('');
 
   // Restore user session on mount
   useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const hashParams = new URLSearchParams(window.location.hash.replace('#', '?'));
+    
+    const isVerifiedFromUrl = params.get('verified') === 'true';
+    const isVerifiedFromHash = hashParams.get('type') === 'signup' || hashParams.has('access_token');
+
+    if (isVerifiedFromUrl || isVerifiedFromHash) {
+      // Clear automatic session to ensure normal email/password sign-in
+      authService.signOut();
+      
+      // Remove query and hash params for a clean address bar
+      window.history.replaceState(null, '', window.location.pathname);
+      
+      setVerifiedSuccessMessage('Email verified successfully. You can now sign in.');
+      setCurrentScreen('login');
+      return;
+    }
+
     const session = authService.getCurrentSession();
     if (session) {
       setUserId(session.id);
@@ -77,12 +96,12 @@ export default function App() {
     }
   }, [isAuthenticated, userId]);
 
-  // Force profile screen when onboarding is incomplete
+  // Force profile screen when onboarding is incomplete (only after profile is loaded)
   useEffect(() => {
-    if (isAuthenticated && !userProfile.onboardingComplete) {
+    if (isAuthenticated && userProfile.email !== "" && !userProfile.onboardingComplete) {
       setCurrentScreen('profile');
     }
-  }, [isAuthenticated, userProfile.onboardingComplete]);
+  }, [isAuthenticated, userProfile.email, userProfile.onboardingComplete]);
 
   const saveProfile = async (newProfile: UserProfile) => {
     setUserProfile(newProfile);
@@ -166,10 +185,30 @@ export default function App() {
   const renderScreen = () => {
     if (!isAuthenticated) {
       if (currentScreen === 'login') {
-        return <Login onSuccess={handleAuthSuccess} onNavigateToSignup={() => setCurrentScreen('signup')} />;
+        return (
+          <Login 
+            onSuccess={(user) => {
+              setVerifiedSuccessMessage('');
+              handleAuthSuccess(user);
+            }} 
+            onNavigateToSignup={() => {
+              setVerifiedSuccessMessage('');
+              setCurrentScreen('signup');
+            }} 
+            verifiedSuccessMessage={verifiedSuccessMessage}
+          />
+        );
       }
       if (currentScreen === 'signup') {
-        return <Signup onSuccess={handleAuthSuccess} onNavigateToLogin={() => setCurrentScreen('login')} />;
+        return (
+          <Signup 
+            onSuccess={handleAuthSuccess} 
+            onNavigateToLogin={() => {
+              setVerifiedSuccessMessage('');
+              setCurrentScreen('login');
+            }} 
+          />
+        );
       }
       return (
         <LandingPage 

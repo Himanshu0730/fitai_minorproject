@@ -146,8 +146,14 @@ Be realistic but helpful. If you cannot see food, analyze the user's hint text: 
   // Vite middleware for development or serving built files for production
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
+      root: process.cwd(),
       server: { middlewareMode: true },
       appType: "spa",
+      define: {
+        "import.meta.env.VITE_SUPABASE_URL": JSON.stringify(process.env.VITE_SUPABASE_URL || ""),
+        "import.meta.env.VITE_SUPABASE_ANON_KEY": JSON.stringify(process.env.VITE_SUPABASE_ANON_KEY || ""),
+        "import.meta.env.VITE_GEMINI_API_KEY": JSON.stringify(process.env.VITE_GEMINI_API_KEY || ""),
+      }
     });
     app.use(vite.middlewares);
   } else {

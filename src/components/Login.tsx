@@ -1,24 +1,49 @@
 import React, { useState } from 'react';
-import { Shield, CreditCard, Star, Dumbbell, Mail, Lock, Eye, EyeOff } from 'lucide-react';
+import { Shield, CreditCard, Star, Dumbbell, Mail, Lock, Eye, EyeOff, Check } from 'lucide-react';
 import { motion } from 'motion/react';
 import { authService } from '../lib/supabase';
 
 interface LoginProps {
   onSuccess: (user: { id?: string; fullName: string; email: string }) => void;
   onNavigateToSignup: () => void;
+  verifiedSuccessMessage?: string;
 }
 
-export default function Login({ onSuccess, onNavigateToSignup }: LoginProps) {
+export default function Login({ onSuccess, onNavigateToSignup, verifiedSuccessMessage }: LoginProps) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [resendLoading, setResendLoading] = useState(false);
+  const [resendSuccess, setResendSuccess] = useState(false);
+
+  const handleResendVerification = async () => {
+    if (!email.trim() || !email.includes('@')) {
+      setError('Please enter a valid email address to resend verification.');
+      return;
+    }
+    setResendLoading(true);
+    setResendSuccess(false);
+    try {
+      const response = await authService.resendVerification(email);
+      if (response.success) {
+        setResendSuccess(true);
+      } else {
+        setError(response.error || 'Failed to resend verification email.');
+      }
+    } catch (err: any) {
+      setError(err.message || 'Error resending verification email.');
+    } finally {
+      setResendLoading(false);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
     setLoading(true);
+    setResendSuccess(false);
 
     if (!email.trim() || !email.includes('@')) {
       setError('Please enter a valid email address');
@@ -49,6 +74,8 @@ export default function Login({ onSuccess, onNavigateToSignup }: LoginProps) {
     }
   };
 
+  const isUnverified = error.toLowerCase().includes('confirm') || error.toLowerCase().includes('verify');
+
   return (
     <div id="login-container" className="min-h-screen bg-[#0B0F13] text-gray-100 flex flex-col justify-between py-12 px-4 sm:px-6 lg:px-8 font-sans">
       {/* Upper Logo / Brand */}
@@ -74,14 +101,45 @@ export default function Login({ onSuccess, onNavigateToSignup }: LoginProps) {
       >
         <div className="absolute top-0 left-0 w-full h-0.75 bg-linear-to-r from-emerald-500 via-teal-400 to-emerald-600"></div>
 
+        {verifiedSuccessMessage && (
+          <div id="login-verified-alert" className="mb-5 p-3.5 bg-emerald-950/40 border border-emerald-800/40 rounded-xl text-xs text-emerald-300 flex items-center gap-2.5 shadow-lg shadow-emerald-950/20">
+            <Check className="w-4.5 h-4.5 text-emerald-400 shrink-0" />
+            <span className="font-medium">{verifiedSuccessMessage}</span>
+          </div>
+        )}
+
         <div className="mb-6">
           <h3 className="text-xl font-bold text-white">Welcome back</h3>
           <p className="text-xs text-gray-400 mt-1">Pick up right where you left off with your training and calorie logs</p>
         </div>
 
         {error && (
-          <div id="login-error-alert" className="mb-4 p-3 bg-red-950/40 border border-red-800/50 rounded-lg text-xs text-red-300">
-            {error}
+          <div id="login-error-alert" className="mb-4 space-y-3">
+            <div className="p-3 bg-red-950/40 border border-red-800/50 rounded-lg text-xs text-red-300">
+              {error}
+            </div>
+            {isUnverified && (
+              <div className="p-4 bg-emerald-950/20 border border-emerald-800/40 rounded-xl space-y-2.5 text-xs text-emerald-300">
+                <p className="font-bold">💡 Verification Required:</p>
+                <p className="leading-relaxed text-gray-300 text-[11px]">
+                  Your email address is not verified yet. Please check your inbox (and Spam folder) for the verification link.
+                </p>
+                {resendSuccess ? (
+                  <p className="text-[11px] text-emerald-400 font-semibold bg-emerald-950/40 border border-emerald-900/30 p-2 rounded-lg">
+                    ✓ New verification link sent! Please check your email.
+                  </p>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={handleResendVerification}
+                    disabled={resendLoading}
+                    className="w-full bg-emerald-500 hover:bg-emerald-600 text-white font-semibold py-1.5 px-3 rounded-lg text-[11px] transition-colors cursor-pointer flex items-center justify-center disabled:opacity-50"
+                  >
+                    {resendLoading ? 'Resending Link...' : 'Resend Verification Email'}
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         )}
 
